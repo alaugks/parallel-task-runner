@@ -2,42 +2,24 @@
 
 package io.github.alaugks.taskrunner;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TaskRunnerTest {
 
 	interface TestTask extends TaskRunnerInterface {}
 
-	@Test
-	void testRunAll10Minutes() {
+	interface OtherTask extends TaskRunnerInterface {}
 
-		TaskRunnerInterface mockMinutesTask = mock(TaskRunnerInterface.class);
-
-		List<TaskRunnerInterface> taskMap = new ArrayList<>();
-		taskMap.add(mockMinutesTask);
-		taskMap.add(mockMinutesTask);
-
-		TaskRunner runner = TaskRunner.builder(taskMap).build();
-
-		runner.runAll(TaskRunnerInterface.class);
-
-		verify(mockMinutesTask, times(2)).run();
-	}
-
+	/** Worker threads are named with the "task-" prefix. */
 	@Test
 	void test_runAll_setsCustomThreadName() {
 		Set<String> threadNames = ConcurrentHashMap.newKeySet();
@@ -47,25 +29,24 @@ class TaskRunnerTest {
 		TaskRunner runner = TaskRunner.builder(List.of(task)).build();
 		runner.runAll(TestTask.class);
 
-		assertEquals(1, threadNames.size(), "Exactly one thread name should be captured");
-		String threadName = threadNames.iterator().next();
-		assertTrue(threadName.startsWith("task-"), "Thread name should start with 'task-' but was: " + threadName);
+		assertThat(threadNames).as("Exactly one thread name should be captured").hasSize(1);
+		assertThat(threadNames.iterator().next()).startsWith("task-");
 	}
 
+	/** An exception thrown by a task is wrapped in a TaskRunnerRuntimeException. */
 	@Test
 	void test_runAll_wrapsExceptionOfTask() {
 		TestTask failingTask = () -> { throw new IllegalStateException("Boom"); };
 
 		TaskRunner runner = TaskRunner.builder(List.of(failingTask)).build();
 
-		TaskRunnerRuntimeException ex = assertThrows(TaskRunnerRuntimeException.class, () -> {
-			runner.runAll(TestTask.class);
-		});
-
-		assertInstanceOf(IllegalStateException.class, ex.getCause());
-		assertEquals("Boom", ex.getCause().getMessage());
+		assertThatThrownBy(() -> runner.runAll(TestTask.class))
+			.isInstanceOf(TaskRunnerRuntimeException.class)
+			.hasCauseInstanceOf(IllegalStateException.class)
+			.cause().hasMessage("Boom");
 	}
 
+	/** An interrupted caller gets the interrupt flag restored and a TaskRunnerRuntimeException. */
 	@Test
 	void test_runAll_restoresInterruptFlagWhenInterrupted() {
 		CountDownLatch release = new CountDownLatch(1);
@@ -81,30 +62,32 @@ class TaskRunnerTest {
 
 		Thread.currentThread().interrupt();
 		try {
-			TaskRunnerRuntimeException ex = assertThrows(TaskRunnerRuntimeException.class, () -> {
-				runner.runAll(TestTask.class);
-			});
+			assertThatThrownBy(() -> runner.runAll(TestTask.class))
+				.isInstanceOf(TaskRunnerRuntimeException.class)
+				.hasCauseInstanceOf(InterruptedException.class);
 
-			assertInstanceOf(InterruptedException.class, ex.getCause());
-			assertTrue(Thread.currentThread().isInterrupted(), "Interrupt flag should be restored");
+			assertThat(Thread.currentThread().isInterrupted()).as("Interrupt flag should be restored").isTrue();
 		} finally {
 			Thread.interrupted();
 			release.countDown();
 		}
 	}
 
+	/** The builder rejects a pool size below 1. */
 	@Test
 	void test_builder_rejectsInvalidPoolSize() {
 		TaskRunner.Builder builder = TaskRunner.builder(List.of());
 
-		assertThrows(IllegalArgumentException.class, () -> builder.poolSize(0));
+		assertThatThrownBy(() -> builder.poolSize(0)).isInstanceOf(IllegalArgumentException.class);
 	}
 
+	/** The builder rejects a null task list. */
 	@Test
 	void test_builder_rejectsNullTasks() {
-		assertThrows(NullPointerException.class, () -> TaskRunner.builder(null));
+		assertThatThrownBy(() -> TaskRunner.builder(null)).isInstanceOf(NullPointerException.class);
 	}
 
+	/** With a pool size of 1, never more than one task runs at a time. */
 	@Test
 	void test_runAll_respectsPoolSize() {
 		AtomicInteger running = new AtomicInteger();
@@ -125,6 +108,49 @@ class TaskRunnerTest {
 			.build();
 		runner.runAll(TestTask.class);
 
-		assertEquals(1, maxRunning.get());
+		assertThat(maxRunning.get()).isEqualTo(1);
+	}
+
+	/** With a sufficient pool size, all tasks run at the same time. */
+	@Test
+	void test_runAll_runsTasksInParallel() {
+		int taskCount = 3;
+		CountDownLatch allRunning = new CountDownLatch(taskCount);
+		AtomicInteger completed = new AtomicInteger();
+
+		// Each task only finishes once all tasks are running at the same time.
+		TestTask task = () -> {
+			allRunning.countDown();
+			try {
+				if (allRunning.await(5, TimeUnit.SECONDS)) {
+					completed.incrementAndGet();
+				}
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		};
+
+		TaskRunner runner = TaskRunner.builder(List.of(task, task, task))
+			.poolSize(taskCount)
+			.build();
+		runner.runAll(TestTask.class);
+
+		assertThat(completed.get()).as("All tasks should have run at the same time").isEqualTo(taskCount);
+	}
+
+	/** Only tasks implementing the given interface run; tasks of other interfaces are skipped. */
+	@Test
+	void test_runAll_runsOnlyTasksOfGivenInterface() {
+		AtomicInteger testTaskRuns = new AtomicInteger();
+		AtomicInteger otherTaskRuns = new AtomicInteger();
+
+		TestTask testTask = testTaskRuns::incrementAndGet;
+		OtherTask otherTask = otherTaskRuns::incrementAndGet;
+
+		TaskRunner runner = TaskRunner.builder(List.of(testTask, otherTask)).build();
+		runner.runAll(TestTask.class);
+
+		assertThat(testTaskRuns.get()).isEqualTo(1);
+		assertThat(otherTaskRuns.get()).as("Tasks of other interfaces must not run").isZero();
 	}
 }
