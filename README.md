@@ -249,25 +249,7 @@ concurrently, all others are ignored. To run a task group on a schedule,
 enable Spring scheduling and annotate a method with `@Scheduled`. The example
 below runs `NoonTask` every day at 12:00 and `MidnightTask` every day at 00:00.
 
-Enable scheduling once in your application (for example on the main class):
-
-```java
-package com.example;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.scheduling.annotation.EnableScheduling;
-
-@SpringBootApplication
-@EnableScheduling
-public class Application {
-    public static void main(String[] args) {
-        SpringApplication.run(Application.class, args);
-    }
-}
-```
-
-Then add a scheduled trigger that delegates to `TaskRunner`.
+Enable scheduling once in your application. Then add a scheduled trigger that delegates to `TaskRunner`.
 
 ```java
 package com.example.tasks;
@@ -277,6 +259,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 @Component
+@EnableScheduling
 public class ScheduledTasks {
 
     private final TaskRunner taskRunner;
