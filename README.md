@@ -255,6 +255,7 @@ Enable scheduling once in your application. Then add a scheduled trigger that de
 package com.example.tasks;
 
 import io.github.alaugks.taskrunner.TaskRunner;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
